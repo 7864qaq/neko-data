@@ -96,13 +96,22 @@ class TensorValue:
         return torch.from_numpy(self.to_numpy())
 
 
-def encode_typed_tree(value: Any, *, max_bytes: int = DEFAULT_MAX_BYTES) -> bytes:
-    """Encode a nested tree as an uncompressed NPZ with an explicit JSON schema.
+def _compression_level(value: int) -> int:
+    if type(value) is not int or not 0 <= value <= 9:
+        raise ValueError("compression_level must be an integer from 0 (stored) to 9 (Deflate)")
+    return value
+
+
+def encode_typed_tree(value: Any, *, max_bytes: int = DEFAULT_MAX_BYTES, compression_level: int = 0) -> bytes:
+    """Encode a nested tree as a lossless NPZ with an explicit JSON schema.
 
     Supported leaves are JSON scalars, bytes, numeric/bool NumPy arrays/scalars
     and ``TensorValue``. Dictionary keys may be JSON scalars, including integers.
     Ragged arrays are lists/tuples of dense arrays, never NumPy object arrays.
+    Level 0 retains the original np.savez bytes; levels 1-9 Deflate each exact
+    NPY member. The expanded-data and encoded-file limits apply in both modes.
     """
+    level = _compression_level(compression_level)
     if max_bytes <= 0:
         raise ValueError("max_bytes must be positive")
     arrays: dict[str, np.ndarray] = {}
@@ -162,7 +171,16 @@ def encode_typed_tree(value: Any, *, max_bytes: int = DEFAULT_MAX_BYTES) -> byte
         raise ValueError("Typed sample exceeds max_bytes")
     arrays[_TREE] = np.frombuffer(encoded, dtype=np.uint8)
     output = io.BytesIO()
-    np.savez(output, **arrays)
+    if level == 0:
+        np.savez(output, **arrays)  # keep the default wire bytes exactly unchanged
+    else:
+        with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED,
+                             compresslevel=level, allowZip64=True) as archive:
+            for name, array in arrays.items():
+                # Stream one NPY member, never build/recompress a second whole
+                # uncompressed NPZ. Object/pickle dtypes were already rejected.
+                with archive.open(name + ".npy", "w", force_zip64=True) as member:
+                    np.lib.format.write_array(member, array, allow_pickle=False)
     payload = output.getvalue()
     if len(payload) > max_bytes:
         raise ValueError("Encoded typed sample exceeds max_bytes (including NPZ headers)")
@@ -283,14 +301,16 @@ class TypedSample:
     split: str = "train"
     source_id: str = "unknown"
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    compression_level: int = 0
 
     def __post_init__(self) -> None:
         validate_sample_key(self.sample_key)
+        _compression_level(self.compression_level)
         # Unlike data, searchable sidecar metadata must be ordinary JSON.
         json.dumps(dict(self.metadata), allow_nan=False)
 
     def encode(self) -> bytes:
-        return encode_typed_tree(self.data)
+        return encode_typed_tree(self.data, compression_level=self.compression_level)
 
     def metadata_payload(self, payload: bytes) -> dict[str, Any]:
         return {**self.metadata, "schema_version": "1.0", "sample_format": TYPED_SAMPLE_FORMAT,

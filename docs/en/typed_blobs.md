@@ -42,12 +42,25 @@ For optional PyTorch conversion use
 `bfloat16` is preserved as its original two-byte words, rather than converted to
 float32. No torch import occurs in the tensor codec itself.
 
-The `typed-npz-v1` payload is an **uncompressed NPZ** with a tagged JSON tree and
-numeric NPY arrays. Loading always uses `allow_pickle=False`. The reader checks
+The `typed-npz-v1` payload is an NPZ with a tagged JSON tree and numeric NPY
+arrays. It remains **uncompressed by default**, with exactly the original
+`np.savez` byte path. Optional `TypedSample(..., compression_level=1)` or
+`encode_typed_tree(tree, compression_level=1)` applies lossless Deflate to each
+unchanged NPY member; integer levels 1 through 9 are supported. The default is 0
+(stored). No new sample format or metadata fields are needed: the ZIP member
+headers describe the codec, and existing readers support it. A reader returns
+decoded data, without preserving the original encoding-level preference.
+
+Loading always uses `allow_pickle=False`. The reader checks
 archive names, duplicate entries, expanded size, NPY shape/byte counts, dtypes,
 tree depth and references before returning data. Default payload limit is 1 GiB;
 split large trajectories into independent segments. Use `BlobSample` for model
 files instead of putting multi-GB checkpoints inside a tensor tree.
+Compression does not relax the expanded-data limit. A sample whose original
+arrays and tree exceed 1 GiB still requires splitting into complete segments.
+Blob/model files remain streamed without compression. Compression is opt-in;
+measure CPU time, encoded bytes and sustained publication speed on actual data
+before choosing it for a training pipeline.
 
 Versioned tensor/blob keys must be canonical relative names: no leading dot or
 slash, backslashes, drive prefixes, NUL, empty path components, `.` or `..`.
